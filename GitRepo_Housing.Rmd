@@ -1,0 +1,584 @@
+---
+title: "Data Wrangling and randomForest"
+author: "Marc Kullmann"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    number_sections: yes
+  html_document:
+    df_print: paged
+fontsize: 11pt
+urlcolor: blue
+---
+\tableofcontents
+\newpage 
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(eval = FALSE, include = TRUE)
+library(ggplotFL)
+library(scales)
+library(broom)
+library(randomForest)
+library(lubridate)
+#library(OpenStreetMap)
+library(tidyverse)
+library(geosphere)
+```
+
+
+
+# Introduction
+This markdown is a small attempt to get used to the evironment of R and the machine learning algorithm of random forest, hereby I used the dataset from kaggle (https://www.kaggle.com/ruiqurm/lianjia). As one can find, several enthusiasts have conducted comprehensive analysis on this dataset, however, I have worked mostly on my own.
+
+# Data Overview and Cleaning
+## Import data, declare tibble, overview
+First of all we have to import the described data file as a dataframe do work with. For convenience, I choose to declare the CSV file as a tibble dataframe. 
+```{r Read the data, warning=FALSE}
+Df <- read.csv('/Users/marckullmann/Desktop/Master 1/R_5811_Paper/new.csv', 
+               sep=',', fileEncoding="latin1")
+data <- as_tibble(Df)
+```
+Get a quick overview of the underlaying data set. 
+```{R Overview, warning=FALSE}
+class(data)
+str(data)
+head(data)
+```
+
+ 
+## Missing Data
+```{r Missing data, warning=FALSE}
+#Tidy Data: Find all the missing Data in variables
+indx <- as.data.frame(apply(data, 2, function(x) any(is.na(x) | is.infinite(x))),
+                      keep.rownames = TRUE) %>% 
+  rename(value = `apply(data, 2, function(x) any(is.na(x) | is.infinite(x)))`)
+indx <- as_tibble(rownames_to_column(indx)) %>% 
+  mutate(sum_na = sapply(data, function(x) sum(is.na(x)))) %>%
+  filter(indx, value == TRUE) 
+indx
+```
+As we can see 6 variables contain missing data. Now it is interesting how many observations are missing in these 6 variables! Furthermore, we can see almost 50 % of the variable of DOM are missing, hence we cannot drop the missing observations from this particular variable, but from the others.
+```{r NA-treatment, warning=FALSE}
+# Tidy Data: Drop all the missing Data except DOM
+data <- data %>% drop_na(-DOM)
+```
+
+## Classification of Variables
+As we know, the variable DOM has lots of missing values, hence we follow the siggestion of Mr. Bouchet and replace the missing values with the median. Furthermore, we extract the floor number of the wrongly imported floor variable.
+```{r Mutation of data, warning=FALSE}
+# Replace NaN of DOM with median and change certian variables as numeric.
+data <- mutate(data, DOM = ifelse(is.na(DOM), median(DOM,na.rm=T), DOM),
+               floor = as.numeric((str_extract(floor, "[0-9]+"))),
+               followers = as.numeric(followers), 
+               price = as.numeric(price),
+               livingRoom = as.numeric((str_extract(livingRoom, "[0-9]+"))), 
+               drawingRoom = as.numeric((str_extract(drawingRoom, "[0-9]+"))),
+               kitchen = as.numeric((str_extract(kitchen, "[0-9]+"))),
+               bathRoom = as.numeric((str_extract(bathRoom, "[0-9]+"))),
+               roomNumber = livingRoom + drawingRoom + bathRoom + kitchen
+               )
+```
+
+
+```{r constructionTime treatment, warning=FALSE}
+# Construction Time is labeled as factor, which needs a special treatment
+
+data <- mutate(data, constructionTime = 
+                 as.numeric((str_extract(constructionTime, "[0-9]+"))))
+summary(data$constructionTime)
+data <- mutate(data, constructionTime = ifelse(is.na(constructionTime),
+                                               median(constructionTime,na.rm=T), constructionTime))
+summary(data$constructionTime)
+```
+Now we have 18747 NA's in our data set. Lets check how constructionTime is distributed after replacing it with the median.
+
+Now we classify each categorical variable into the according group (levels/factors) 
+```{r Level adjustments and mutation, warning=FALSE}
+# Generate Grouping-Functions:
+{makeBuildingType <- function(x){
+  if(!is.na(x)){
+    if(x==1){
+      return('Tower')
+    }
+    else if (x==2){
+      return('Bungalow')
+    }
+    else if (x==3){
+      return('Mix_plate_tower')
+    }
+    else if (x==4){
+      return('plate')
+    }
+    else return('wrong_coded')
+  }
+  else{return('missing')}
+}
+
+makeRenovationCondition <- function(x){
+  if(x==1){
+    return('Other')
+  }
+  else if (x==2){
+    return('Rough')
+  }
+  else if (x==3){
+    return('Simplicity')
+  }
+  else if (x==4){
+    return('Hardcover')
+  }
+}
+
+makeBuildingStructure <- function(x){
+  if(x==1){
+    return('Unknown')
+  }
+  else if (x==2){
+    return('Mix')
+  }
+  else if (x==3){
+    return('Brick_Wood')
+  }
+  else if (x==4){
+    return('Brick_Concrete')
+  }
+  else if (x==5){
+    return('Steel')
+  }
+  else if (x==6){
+    return('Steel_Concrete')
+  }
+}
+}
+
+# Mutate rest of the Variables into categorical variables:
+data <- mutate(data, buildingType = sapply(buildingType, makeBuildingType),
+                renovationCondition = sapply(renovationCondition,
+                                             makeRenovationCondition),
+                buildingStructure = sapply(buildingStructure, 
+                                           makeBuildingStructure),
+                subway = ifelse(subway == 1, 'has_subway', 'no_subway'),
+                fiveYearsProperty = ifelse(fiveYearsProperty == 1, 
+                                           'owner_less_5y', 'owner_more_5y'),
+                elevator = ifelse(elevator == 1, 'has_elevator' , 'no_elevator')
+                )
+
+# Finish up the rest of the rest of the categories
+data <- mutate(data,
+               buildingType = as.factor(buildingType),
+               renovationCondition = as.factor(renovationCondition),
+               buildingStructure = as.factor(buildingStructure),
+               elevator = as.factor(elevator),
+               fiveYearsProperty = as.factor(fiveYearsProperty),
+               subway = as.factor(subway),
+               district = as.factor(district)
+               )
+
+# Now we are adjusting the time variable
+# Declare tradeTime as Date, extract year, month and day
+data <- mutate(data, tradeTime = as.Date(tradeTime, format = "%Y-%m-%d"),
+             tradeYear = as.numeric(format(tradeTime, format="%Y")),
+             tradeMonth = as.numeric(format(tradeTime, format="%m")),
+             tradeDay = as.numeric(format(tradeTime, format="%d")))
+
+# Check the nature of each variable
+str(data)
+
+```
+## Summary
+Summarize all key variables
+```{r summary of key variables, warning=FALSE}
+# Summary of key variables, excluding dates and factors.
+df.sum <- data %>%
+  select(-c(url, id, buildingType, renovationCondition, buildingStructure, 
+            elevator, fiveYearsProperty, subway, district, tradeTime)) %>%
+        summarise_each(funs(min = min, 
+                      q25 = quantile(., 0.25), 
+                      median = median, 
+                      q75 = quantile(., 0.75), 
+                      max = max,
+                      mean = mean, 
+                      sd = sd))
+
+df.sum <- df.sum %>% gather(stat, val) %>%
+                  separate(stat, into = c("var", "stat"), sep = "_") %>%
+                  spread(stat, val) %>%
+                  select(var, min, q25, median, q75, max, mean, sd)
+df.sum
+```
+
+## Plot average daily Price
+Now we graph the average daily price. To plot our data more intuitively we omit trades before 2009, as there are only few observations. continuing with saving the plot in the Data priceplot.
+```{r Avg. Daily Price Plot, warning=FALSE}
+
+# Calculate average daily price
+avg_price <- data %>% group_by(tradeTime) %>% 
+                    summarize(mean_price = mean(totalPrice, na.rm = TRUE)) %>%
+                    mutate(year = format(tradeTime, format="%Y"))
+
+data <- mutate(data, buldingAge = 2019 - constructionTime)
+
+# Plot average daily price from 2010 on
+filter(avg_price, year > 2009) %>% 
+  ggplot(avg_price, mapping = aes(x = tradeTime, y = mean_price)) +
+  geom_point(aes(colour=mean_price), alpha=.25) +
+  labs(
+    title='Daily Average Total Price of Traded Homes, from 2010 to 2018',
+    x = "Date", 
+    y = "Average total Price per Day, in ten thousand RMB", 
+    colour = "Mean Price") +
+  scale_colour_gradient(low = "black", high = "blue1") +
+  scale_radius(range=c(1,10))
+  ggsave("DailyAvg.Price.pdf")
+```
+Interesting in this plot is, that we cann see that the average daily price rise over the course of approximately eight years. Although, this is only a rough estimation, as we don't know where and which objects were sold.
+
+## Implement Location Information
+To run a regression with the location information, we need to think about how to incorporate the geo information of each object. As we have the longitude and latitude coordinates, we can calculate the distance for each object from the city center of Beijing. The coordinates of the city center are followed by the webpage wikipedia:
+
+39.9042º N, 116.4074º E
+
+To Calculate the distance of each object I use the haversine formula, which "determines the great-circle distance between two points on a sphere given their longitudes and latitudes." (source: https://en.wikipedia.org/wiki/Haversine_formula). Therefore I make use of the "geosphere" package.
+
+```{r Location implementation, warning=FALSE}
+# Calculate the Distance
+data <- data %>% 
+  mutate(bj_lat = 39.9042, bj_log = 116.4074) %>% 
+  mutate(dist = distHaversine(cbind(Lng, Lat), cbind(bj_log, bj_lat), r=6378137))
+
+# Add District Factors
+makeDistrict <- function(x){
+  if(!is.na(x)){
+    if(x==1){
+      return('Dong Cheng')
+    }
+    else if (x==2){
+      return('Chong Wen & Xuan Wu')
+    }
+    else if (x==3){
+      return('Feng Tai')
+    }
+    else if (x==4){
+      return('Da Xing')
+    }
+    else if (x==5){
+      return('Fang Shan')
+    }
+    else if (x==6){
+      return('Chang Ping')
+    }
+    else if (x==7){
+      return('Chao Yang')
+    }
+    else if (x==8){
+      return('Hai Dian')
+    }
+    else if (x==9){
+      return('Shi Jing Shan')
+    }
+    else if (x==10){
+      return('Xi Cheng')
+    }
+    else if (x==11){
+      return('Tong Zhou')
+    }
+    else if (x==12){
+      return('Men Tou Gou')
+    }
+    else if (x==13){
+      return('Shun Yi')
+    }
+    else return('wrong_coded')
+  }
+  else{return('missing')}
+}
+
+data <- mutate(data, District = as.factor(sapply(district, makeDistrict)))
+```
+
+```{r Introducing the OSM-Map, eval=FALSE, include=TRUE, warning=FALSE}
+# Download a Map of Beijing
+# Longidude and Latidue Data are scratched from OpenStreetMap
+map_bw <- openmap(c(39.6216, 115.9634000),
+               c(40.2701000, 116.7778),
+               minNumTiles=5,
+               type = "stamen-toner")
+plot(map_bw)
+
+trans_by_district <- data %>% group_by(District) %>%
+  summarise(Transactions = n(),
+            AveragePrice = round(mean(totalPrice), digits = 2),
+            AverageDistance = round(mean(dist), digits = 2))
+trans_by_district
+```
+
+# Analysis
+## Plotting Transactions
+```{r Plot locations, eval=FALSE, include=TRUE, warning=FALSE}
+autoplot(OpenStreetMap::openproj(map_bw)) +
+  geom_point(data = data, aes(x = Lng, 
+                              y = Lat, 
+                              shape = District, 
+                              colour = District)) +
+  scale_shape_manual(values=1:nlevels(data$District)) +
+  labs(title='Districts By Colour') +
+  theme(axis.title.x = element_blank(),
+       axis.text.x = element_blank(),
+       axis.ticks.x = element_blank(),
+       axis.title.y = element_blank(),
+       axis.text.y = element_blank(),
+       axis.ticks.y = element_blank())
+# ggsave("map_sales_location_bw.png")
+```
+
+```{r Plot Price in relation to location, eval=FALSE, include=TRUE, warning=FALSE}
+autoplot(OpenStreetMap::openproj(map_bw)) +
+  geom_point(data = data, aes(x = Lng,
+                              y = Lat, 
+                              shape = District, 
+                              colour = price), 
+    size=1.3,alpha=.5) +
+  scale_shape_manual(values=1:nlevels(data$District)) +
+  scale_colour_gradient(low = "blue", high = "red") +
+  labs(title='Houseprice per Sq.ft per District') +
+  theme(axis.title.x = element_blank(),
+       axis.text.x = element_blank(),
+       axis.ticks.x = element_blank(),
+       axis.title.y = element_blank(),
+       axis.text.y = element_blank(),
+       axis.ticks.y = element_blank())
+# ggsave("map_houseprice_bw.png")
+```
+
+## Price Evolution for each District by Year
+```{r Monthly Average Price per District, warning=FALSE}
+# Monthly Average Price per District
+data %>% filter(tradeYear > 2010) %>%
+  group_by(month=floor_date(tradeTime, "month"), District) %>%
+  summarize(summary_variable=mean(totalPrice)) %>%
+  ggplot(aes(month, summary_variable, color = District)) +
+  geom_line() +
+  facet_wrap( ~ District, ncol = 2) +
+  labs(title = "Monthly Average Price per District",
+       subtitle = "Data plotted by Month",
+       y = "Average Total Price",
+       x = "Year") +
+  theme(legend.position = "none")
+# ggsave("map_avgpriceperdistrict.png")
+```
+
+```{r Total Price Change per District, warning=FALSE}
+# Total Price Change per District (absolute)
+data %>% filter(tradeYear > 2010) %>%
+  group_by(tradeYear, District) %>%
+  ggplot(aes(x = reorder(District, -totalPrice), 
+             y = totalPrice, 
+             color = District)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = -45, 
+                                   vjust = 1, 
+                                   hjust = 0),
+        legend.position = "none",
+        axis.title.x = element_blank()) +
+#  coord_flip() +
+  labs(title = "Total Price per District",
+       subtitle = "Data plotted by District",
+       y = "Total Price")
+# ggsave("map_priceperdistrict.png")
+```
+
+```{r Monthly Price Change per District, warning=FALSE}
+# Monthly Price Change per District (absolute)
+data %>% filter(tradeYear > 2010) %>%
+  group_by(month=floor_date(tradeTime, "month"), District) %>%
+  ggplot(aes(District, totalPrice, color = District)) +
+  geom_boxplot(outlier.shape = NA) + 
+  scale_y_continuous(limits = c(0, 900)) +
+  facet_wrap( ~ tradeYear  , ncol = 4) + 
+  labs(title = "Total Price per District (absolute)",
+       subtitle = "Data plotted by Year and District",
+       y = "Total Price (in RMB)",
+       x = "Time") +
+  theme(axis.text.x = element_text(angle = -45, 
+                                   vjust = 1, 
+                                   hjust = 0),
+        legend.position="none")
+# ggsave("map_monthlypricechangeperdistrict.pdf")
+```
+
+## Regressions
+The nature of this data set is obviously a time series, although I need to say, I have not implmented my time series analysis yet. Furthermore, this analysis is more orientated towards the randomForest part.
+
+### Linear Regression
+```{r Linear Regression, warning=FALSE}
+ttest <- data %>%
+  nest(-District) %>%
+  mutate(fit = map(data, ~t.test(.$totalPrice)),
+         p   = map_dbl(fit, "p.value"),
+         results = map(fit, glance)) %>%
+  unnest(results)
+
+ttest2 <- data %>%
+  nest(-District) %>%
+  mutate(fit = map(data, ~t.test(.$totalPrice)),
+         p   = map_dbl(fit, "p.value"),
+         results = map(fit, glance)) %>%
+  unnest(results)
+
+reg1.1 <- data %>%
+  nest(-District) %>%
+  mutate(fit = map(data, ~ lm(price ~ 
+                                DOM +  livingRoom +  drawingRoom +  kitchen + 
+                                bathRoom + floor +  buildingType +  buldingAge +
+                                buildingStructure + elevator +  fiveYearsProperty +
+                                subway +  factor(tradeYear) + 
+                                dist + followers, data = .)),
+         results = map(fit, glance)) %>% 
+  unnest(results) %>%
+  ggplot(aes(x = factor(District), y = r.squared)) +
+  geom_bar(stat = "identity") + 
+  labs(x = "District", y = expression(R^{2})) +
+  theme(axis.text.x = element_text(angle = -45, vjust = 1, hjust = 0)) +
+  ggsave("rsqrtperdistrict1.1.pdf")
+
+reg1.2 <- data %>%
+  nest(-District) %>%
+  mutate(fit = map(data, ~ lm(totalPrice ~ 
+                                DOM +  livingRoom +  drawingRoom +  kitchen + 
+                                bathRoom + floor +  buildingType +  buldingAge +
+                                buildingStructure + elevator +  fiveYearsProperty +
+                                subway +  factor(tradeYear) + 
+                                dist + followers, data = .)),
+         results = map(fit, glance)) %>% 
+  unnest(results) %>%
+  ggplot(aes(x = factor(District), y = r.squared)) +
+  geom_bar(stat = "identity") + 
+  labs(x = "District", y = expression(R^{2})) +
+  theme(axis.text.x = element_text(angle = -45, vjust = 1, hjust = 0)) +
+  ggsave("rsqrtperdistrict1.2.pdf")
+
+reg2.1 <- data %>%
+  nest(-District) %>%
+  mutate(fit = map(data, ~ lm(price ~ 
+                                DOM +  livingRoom +  drawingRoom +  kitchen + 
+                                bathRoom + floor +  buildingType +  buldingAge +
+                                buildingStructure + elevator +  fiveYearsProperty +
+                                subway +  factor(tradeYear) + 
+                                dist + followers, data = .)),
+         results2= map(fit, augment)) %>% 
+  unnest(results2) %>%
+  ggplot(aes(x = price, y = .fitted, shape = District, colour = District)) +
+  scale_shape_manual(values=1:nlevels(data$District)) +
+  geom_abline(intercept = 0, slope = 1, alpha = .2) +  # Line of perfect fit
+  geom_point() +
+#  facet_grid(District ~ .) +
+  theme_bw() +
+  ggsave("modelfitted2.1.pdf")
+  
+reg2.2 <- data %>%
+  nest(-District) %>%
+  mutate(fit = map(data, ~ lm(totalPrice ~ 
+                                DOM +  livingRoom +  drawingRoom +  kitchen + 
+                                bathRoom + floor +  buildingType +  buldingAge +
+                                buildingStructure + elevator +  fiveYearsProperty +
+                                subway +  factor(tradeYear) + 
+                                dist + followers, data = .)),
+         results2= map(fit, augment)) %>% 
+  unnest(results2) %>%
+  ggplot(aes(x = totalPrice, y = .fitted, shape = District, colour = District)) +
+  scale_shape_manual(values=1:nlevels(data$District)) +
+  geom_abline(intercept = 0, slope = 1, alpha = .2) +  # Line of perfect fit
+  geom_point() +
+#  facet_grid(District ~ .) +
+  theme_bw() +
+  ggsave("modelfitted2.2.pdf")
+  
+# Save Regression results into tibble
+reg2tibble <- as_tibble(data %>%
+      nest(-District) %>%
+      mutate(fit = map(data, ~ 
+                         lm(totalPrice ~
+                              DOM +  livingRoom +  drawingRoom +  kitchen +
+                              bathRoom + floor +  buildingType +  buldingAge +
+                              buildingStructure + elevator +  fiveYearsProperty +
+                              subway +  factor(tradeYear) + 
+                              dist + followers, data = .)),
+         results2= map(fit, augment)) %>%
+  unnest(results2))
+
+# Save each Regression plot as own file
+plots <- reg2tibble %>% 
+  split(.$District) %>% 
+  map( ~ ggplot(., aes(x = .fitted, y = .resid)) + 
+         geom_point() + 
+         geom_abline(intercept = 0, 
+                     slope = 1, 
+                     alpha = .2))
+paths <- stringr::str_c(names(plots), ".pdf")
+
+pwalk(list(paths, plots), ggsave)
+```
+
+### Logistic Regression
+```{r Random Forest, warning=FALSE}
+# Convenience function to get importance information from a randomForest fit
+# into a dataframe
+imp_df <- function(rf_fit) {
+  imp <- randomForest::importance(rf_fit)
+  vars <- rownames(imp)
+  imp %>% 
+    tibble::as_tibble() %>% 
+    dplyr::mutate(var = vars)
+}
+
+# Take only 75000 observations as my computing power is limited
+ef_sample <- sample_n(data, size = 75000)
+
+set.seed(123)
+rF <- ef_sample %>% 
+  # Selecting data to work with
+  na.omit() %>% 
+  select(totalPrice, District, 
+           DOM, livingRoom, drawingRoom, kitchen, bathRoom,
+           floor, buildingType, buldingAge, buildingStructure,
+           elevator, fiveYearsProperty, subway, tradeYear,
+           dist, followers) %>% 
+  # Nesting data and fitting model
+  nest(-District) %>% 
+  mutate(fit = map(data, ~ randomForest(totalPrice ~ ., data = .,
+                                        importance = TRUE,
+                                        ntree = 100)),
+         importance = map(fit, imp_df)) %>% 
+  # Unnesting and plotting
+  unnest(importance)
+
+# Plot each feature and its importance separated with each district to 
+# understand how each district is different
+rFPlot <- ggplot(rF, aes(x = `%IncMSE`, y = var, color = `%IncMSE`)) +
+  geom_segment(aes(xend = min(`%IncMSE`), yend = var), alpha = .2) +
+  geom_point(size = 3) +
+  facet_grid(. ~ District) +
+  guides(color = "none") +
+  theme_bw() +
+  labs(y = "Variable",
+       x = "Importance")
+
+# Plot each feature and its importance separated with each district 
+# to understand how each district is different in separate images.
+plotrF <- rF %>% 
+  split(.$District) %>% 
+  map(~ggplot(., aes(x = `%IncMSE`, y = var, color = `%IncMSE`)) +
+        geom_segment(aes(xend = min(`%IncMSE`), yend = var), alpha = .2) +
+        geom_point(size = 3) +
+        facet_grid(. ~ District) +
+        guides(color = "none") +
+        theme_bw() +
+        labs(y = "Variable",
+             x = "Importance"))
+paths <- stringr::str_c(names(plotrF), ".pdf")
+
+pwalk(list(paths, plotrF), ggsave)
+```
+# References
+*  [Housing price in Beijing](https://www.kaggle.com/ruiqurm/lianjia)
+*  [Forecasting Beijing's housing prices](https://www.kaggle.com/jonathanbouchet/forecasting-beijing-s-housing)
