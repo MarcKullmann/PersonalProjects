@@ -1,0 +1,390 @@
+---
+title: "CRM with Classification"
+author: "Marc Kullmann"
+date: "7/21/2019"
+output: 
+  pdf_document:
+    number_sections: true
+---
+\tableofcontents
+
+```{r setup, eval=T, include=F}
+knitr::opts_chunk$set(echo = TRUE, cache = F, warning = FALSE)
+library(tidyverse)
+library(lubridate)
+library(readxl)
+library(scales)
+library(dendextend)
+```
+
+# A Customer Relationship Management Analysis with Classification
+
+## Retrieving the Data
+```{r Retrieving the data & first peek at it, cache = TRUE}
+myurl <- "https://archive.ics.uci.edu/ml/machine-learning-databases/00352/Online%20Retail.xlsx"
+download.file(url=myurl, destfile="online_retail.xlsx", mode="wb")
+Online_Retail <- read_excel("online_retail.xlsx")
+
+df <- as_tibble(Online_Retail)
+
+head(df)
+str(df)
+```
+
+## Recoding
+```{r Recode the data}
+df <- df %>%
+  mutate(uniqueID = row_number(),
+         InvoiceNo = as.factor(InvoiceNo),
+         StockCode = as.factor(StockCode),
+         Quantity = as.numeric(Quantity),
+         InvoiceDate = ymd_hms(InvoiceDate),
+         UnitPrice = as.numeric(UnitPrice),
+         CustomerID = as.factor(CustomerID),
+         Country = as.factor(Country),
+         InvoiceSum = Quantity * UnitPrice)
+
+df <- df %>%
+  mutate(InvoiceYYYYMM = format(as.Date(InvoiceDate), "%Y-%m"),
+         InvoiceMonth = month(InvoiceDate, label = TRUE),
+         InvoiceYear = as.factor(year(InvoiceDate)),
+         InvoiceHour = as.factor(hour(InvoiceDate)),
+         InvoiceWeekday = wday(InvoiceDate, label = TRUE))
+
+backup_df <- df
+
+summary(df)
+```
+
+## Missing Value Treatment I
+```{r Missing Values}
+nas <- 
+  tibble(has.na = sapply(X = df, FUN = function(x){any(is.na(x))}),
+         sum.na = sapply(X = df, FUN = function(x){sum(is.na(x))}),
+         names = colnames(df))
+nas
+```
+As we kann see CustomerID and Description has quite a lot of missing values which needs to investigated further therefore please refer to the appendix
+
+```{r Filter NAs}
+adjustments <- c("wrongly", "found", "Found", "coded", "check", "damaged", 
+                 "incorrectly", "DOTCOM", "dotcom", "destroyed", 
+                 "thrown", "mystery", "amazon",
+                 "Unsaleable", "Incorrect", "lost", "wet", 
+                 "sold", "AMAZON", "debt", "Bank Charges", 
+                 "BANK ACCOUNT", "SAMPLES")
+
+na <- df %>% filter(is.na(CustomerID) | is.na(Description)) %>% # filter categories 
+                                                                # with missing values
+  filter((is.na(CustomerID) & is.na(Description)) |             # No connection
+           (UnitPrice == 0 & Quantity < 0) |                    # Retour, no logical connection
+           grepl(paste(adjustments, collapse="|"), Description) | 
+           grepl("\\?", Description) |                          # Keywords
+           (is.na(CustomerID) & Description == "Manual") |      # Manual correction, without 
+                                                                # customer/description
+           (is.na(CustomerID) & Description == "Discount"))     # Discount, without customer/description
+
+df <- df %>% filter(!(df$uniqueID %in% na$uniqueID))
+
+nas <- 
+  tibble(has.na = sapply(X = df, FUN = function(x){any(is.na(x))}),
+         sum.na = sapply(X = df, FUN = function(x){sum(is.na(x))}),
+         names = colnames(df))
+nas
+
+cat(nas$sum.na[7]/length(df$CustomerID)*100, "% of the CustomerID's are NA's")
+```
+As we can see, we reduced the amout of missing values without any relation to customers (no ID and stock adjustments) by almost 3000 observations. As we step further, we will take care of rest.
+
+## Outlier Detection and Treatment
+
+### Price Outliers
+```{r Price outlier, Histogram and Boxplot}
+range(df$UnitPrice)
+
+hist(x = log(df$UnitPrice), main = "Histogram for UnitPrice", breaks = 20)
+box_price <- boxplot(x = df$UnitPrice,  main="Boxplot for UnitPrice")
+box_price_out <- box_price$out
+
+df_outlier_price <- filter(df, UnitPrice %in% box_price_out)
+df_outlier_price %>% select(UnitPrice) %>% summary()
+```
+It seems there are still some reasonable prices if we check the UnitPrice summary, hence we take the last +/- 3 standard deviation (the two tailed 1% ends) approach.
+
+```{r Price outlier, 3 * sd}
+df_outlier_price <- df %>% filter(UnitPrice >= 3*sd(UnitPrice) | UnitPrice <= -3*sd(UnitPrice))
+df_outlier_price %>% select(UnitPrice) %>% summary()
+
+table(df_outlier_price$Description)
+```
+The prices and the description here look much more unreasonable for our analysis.
+It seems there are 3 items left, so we exclude them.
+```{r Price outlier, product identification}
+products <- c("PICNIC", "VINTAGE", "LOVE SEAT")
+df_outlier_price <- filter(df_outlier_price, !(grepl(paste(products, collapse="|"), Description)))
+
+table(df_outlier_price$Description)
+df <- df %>% filter(!(df$uniqueID %in% df_outlier_price$uniqueID))
+```
+Now we have only some fees and other expenses in out outlier data frame, which we can drop.
+Lets have a look into the distribution of the UnitPrice
+```{r Price Outlier distribution}
+hist(x = log(df$UnitPrice), main = "Histogram for UnitPrice", breaks = 20)
+boxplot(x = log(df$UnitPrice),  main="Boxplot for UnitPrice")
+
+cat("Negative Price:", any(df$UnitPrice < 0), "\n",
+    "Price Range:", range(df$UnitPrice), "\n")
+```
+Both plots are reflecting a reasonable price distribution.
+
+### Quantity Outliers
+```{r Quantity outliers, Histogram and Boxplot}
+range(df$Quantity)
+
+hist(x = log(df$Quantity), main = "Histogram for Quantity", breaks = 20)
+box_quantity <- boxplot(x = df$Quantity, main="Boxplot for Quantity")
+box_quantity_out <- box_quantity$out
+
+df_outlier_quantity <- filter(df, Quantity %in% box_quantity_out)
+df_outlier_quantity %>% select(Quantity) %>% summary()
+```
+Similar to the UnitPrice case we still have some reasonable Quantity amounts in our current outlier DF
+```{r Quantity outlier, 3 * sd}
+df_outlier_quantity <- df %>% filter(Quantity >= 3*sd(Quantity) | 
+                                       Quantity <= -3*sd(Quantity)) %>% 
+  arrange(desc(Quantity))
+df_outlier_quantity %>% select(Quantity) %>% summary()
+
+head(table(df_outlier_quantity$Description), n = 7)
+
+head(select(df_outlier_quantity, 
+            c("InvoiceNo", "StockCode", "Description", 
+              "Quantity", "InvoiceDate", "UnitPrice")), 
+     n = 7)
+tail(select(df_outlier_quantity, 
+            c("InvoiceNo", "StockCode", "Description", 
+              "Quantity", "InvoiceDate", "UnitPrice")), 
+     n = 7)
+
+```
+As we can see the three biggest and three smallest in our outlier data are not reasonable to keep, as the two extremes (Quantity: 80995 and 74215) are directly corrected as well as the third positive one (Quantity: 12540), as it has a price of zero. The last observation with a negative Quantity of 9360 seems also not logical, judging from the StockCodes appearance. Which is why we are going to drop them.
+```{r Quantity outlier, extreme values}
+extremes <- c(540422, 61620, 502123, 540423, 61625, 4288)
+df_outlier_quantity <- df_outlier_quantity %>%
+  filter(grepl(paste(extremes, collapse="|"), uniqueID))
+df <- df %>% filter(!(df$uniqueID %in% df_outlier_quantity$uniqueID))
+
+hist(x = df$Quantity, main = "Histogram for Quantity", breaks = 20)
+boxplot(x = df$Quantity,  main="Boxplot for Quantity")
+```
+
+## Descriptive Analysis
+```{r Dummy Variables for NA and retoure}
+# Dummy Variables for NA and retoure
+df <- df %>%
+  mutate(ex1 = (str_extract(InvoiceNo, "[A-Z]")), # for retoure
+         retoure = ifelse(test = is.na(ex1), F, 
+                          ifelse(ex1 == "C", yes = T, no = F)), # for Missing CustomerID
+         CustomerID_Status = ifelse(is.na(CustomerID), yes = "NoID", no = "ID")) %>% 
+  select(-ex1)
+```
+
+### Statistics
+```{r Total Statistics}
+# Total statistics
+ID_stat <- df %>% group_by(CustomerID_Status) %>%
+  summarize(TotalInvoice = n_distinct(InvoiceNo),
+            totInvoiceSum = sum(InvoiceSum),
+            negInvoiceSum = sum(ifelse(InvoiceSum < 0, InvoiceSum, 0)),
+            posInvoiceSum = sum(ifelse(InvoiceSum >= 0, InvoiceSum, 0)),
+            maxInvoiceSum = max(InvoiceSum),
+            minInvoiceSum = min(InvoiceSum),
+            meanInvoiceSum = mean(InvoiceSum),
+            medianInvoiceSum = median(InvoiceSum),
+            totQuantity = sum(Quantity),
+            negQuantity = sum(ifelse(Quantity < 0, Quantity, 0)),
+            posQuantity = sum(ifelse(Quantity >= 0, Quantity, 0)),
+            maxQuantity = max(Quantity),
+            minQuantity = min(Quantity),
+            meanQuantity = mean(Quantity),
+            medianQuantity = median(Quantity)) %>% 
+  as.matrix(.) %>% t(.) %>% as_tibble(., rownames = "id") %>%
+  rename(Statistics = id,
+         NoNA = V1,
+         OnlyNA = V2) %>%
+  mutate(NoNA = round(as.numeric(NoNA), digits = 2),
+         OnlyNA = round(as.numeric(OnlyNA), digits = 2))
+
+ID_stat2 <- df %>% 
+  summarize(TotalInvoice = n_distinct(InvoiceNo),
+            totInvoiceSum = sum(InvoiceSum),
+            negInvoiceSum = sum(ifelse(InvoiceSum < 0, InvoiceSum, 0)),
+            posInvoiceSum = sum(ifelse(InvoiceSum >= 0, InvoiceSum, 0)),
+            maxInvoiceSum = max(InvoiceSum),
+            minInvoiceSum = min(InvoiceSum),
+            meanInvoiceSum = mean(InvoiceSum),
+            medianInvoiceSum = median(InvoiceSum),
+            totQuantity = sum(Quantity),
+            negQuantity = sum(ifelse(Quantity < 0, Quantity, 0)),
+            posQuantity = sum(ifelse(Quantity >= 0, Quantity, 0)),
+            maxQuantity = max(Quantity),
+            minQuantity = min(Quantity),
+            meanQuantity = mean(Quantity),
+            medianQuantity = median(Quantity)) %>%
+  gather() %>%
+  rename(Statistics = key,
+         All_ID = value)
+ID_stat <- ID_stat %>% inner_join(ID_stat2)
+ID_stat
+```
+
+### Graphics
+As we saw earlier, the missing values in Customer ID is fairly high, which is why we do not exclude them yet and include them into graphics to get an idea how they are distributed over time in realtion to the number of orders.
+```{r Orders by Weekday}
+ggplot(df) +
+  geom_bar(aes(x = InvoiceWeekday, fill = CustomerID_Status)) +
+  labs(title = "Number of Orders per Weekday") +
+  scale_fill_manual(values = c("#6ACB40", "#F8E11D")) +
+  theme_light() +
+  xlab("Invoice Date") + ylab("Number of Orders")
+```
+
+```{r Orders by Month per Year}
+ggplot(df) +
+  geom_bar(aes(x = InvoiceYYYYMM, fill = CustomerID_Status)) +
+  theme_light() +
+  scale_fill_manual(values = c("#6ACB40", "#F8E11D")) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = -45, 
+                                 vjust = 1, 
+                                 hjust = 0)) +
+  xlab("Invoice Date") + ylab("Number of Orders")
+```
+
+```{r Orders By Month}
+ggplot(df) +
+  geom_bar(aes(x = InvoiceMonth, fill=InvoiceWeekday, color = CustomerID_Status)) +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = -45, 
+                                   vjust = 1, 
+                                   hjust = 0)) +
+  labs(title = "Number of Orders per Month") +
+  xlab("Invoice Date") + ylab("Number of Orders")
+```
+
+Judging from the three graphs above, we can conclude that the variation over time in amount of orders are very similar. Which is why we are going to exclude them in the following recency, frequency and monetary analysis.
+
+## CRM - Recency Frequency Monetary Analysis
+```{r RFM, cache = T}
+# Construct Date Variables
+latest <- max(df$InvoiceDate)
+earliest <- min(df$InvoiceDate)
+
+RFM <- df %>% 
+  group_by(CustomerID) %>%
+  mutate(recency = as.numeric(latest - max(InvoiceDate)),
+         frequency = n_distinct(InvoiceNo),
+         monetary = sum(InvoiceSum)/n_distinct(CustomerID),
+         quantity = sum(Quantity)) %>%
+  distinct(Country, recency, frequency, monetary, quantity) %>%
+  ungroup() %>%
+  drop_na() %>%
+  mutate(duplicate = duplicated(CustomerID)) %>%
+  filter(duplicate == 0) %>%
+  select(-duplicate)
+
+RFM %>% summary()
+```
+After understanding the difference of the missing values and its implications from our data set, we are going to drop the NAs
+
+### Implementing the 80/20 Pareto Principle 
+```{r pareto coding}
+pareto8020money <- 0.8 * sum(RFM$monetary)
+pareto8020freq <- 0.8 * sum(RFM$frequency)
+pareto8020quant <- 0.8 * sum(RFM$quantity)
+
+RFM <- RFM %>%
+  mutate(monetaryrank = order(order(monetary, decreasing=FALSE)),
+         quantityrank = order(order(quantity, decreasing=FALSE)),
+         frequancyrank = order(order(frequency, decreasing=FALSE))) %>%
+  arrange(monetaryrank) %>% 
+  mutate(pareto_money = ifelse(cumsum(monetary) <= pareto8020money, 
+                               "Low Value Customer", "High Value Customer")) %>%
+  arrange(quantityrank) %>% 
+  mutate(pareto_quantity = ifelse(cumsum(quantity) <= pareto8020quant, 
+                                  "Low Quantity Customer", "High Quantity Customer")) %>%
+  arrange(frequancyrank) %>% 
+  mutate(pareto_frequency = ifelse(cumsum(frequency) <= pareto8020freq, 
+                                   "Low Frequency Customer", "High Frequency Customer"))
+RFM
+
+table(RFM$pareto_money, RFM$pareto_frequency, RFM$pareto_quantity)
+```
+
+### Customer Relation By Country
+```{r customer relation by country}
+CustomerRelation <-
+  aggregate(RFM[, c(2:5)], 
+            by = list(RFM$Country), 
+            FUN = function(x) {sum(x)})
+CustomerRelation <- CustomerRelation %>%
+  mutate(recency_split = round((recency/sum(recency)*100), digits = 3),
+         frequency_split = round((frequency/sum(frequency)*100), digits = 3),
+         monetary_split = round((monetary/sum(monetary)*100), digits = 3),
+         quantity_split = round((quantity/sum(quantity)*100), digits = 3)) %>%
+  arrange(desc(monetary_split, quantity_split, frequency_split))
+head(CustomerRelation)
+```
+## Customer Segmentation with Hierarchical Clustering
+```{r initiate clusters}
+RFM_scaled <- RFM %>% 
+  mutate_at(c(2:5), funs(c(scale(.)))) # Scale Monetary, Recency, Frequency, Quantity
+
+cluster <- RFM_scaled %>% # Select Monetary, Recency, Frequency, Quantity + Monetary Rank
+  select(c(2:5,7))
+
+# Initiate Cluster
+h_complete <- hclust(dist(x = cluster, method = "euclidean"), method="complete")
+
+# Plot Cluster
+dendo <- as.dendrogram(h_complete)
+dendo %>%
+  set("branches_k_color", k = 14) %>%
+  set("labels_col", k=14) %>%
+  plot(horiz=FALSE, axes=TRUE)
+```
+Here we see how the hierarchical clustering split the data into one tree with many leafs. As we do not want to divide our the customers into too many segments, we choose 14, as this seems judging from the hight a good place.
+```{r cut tree and plot}
+# Cut Tree with 14 clusters
+cluster14 <- cutree(h_complete, k = 14)
+table(cluster14)
+
+cluster_df <- aggregate(RFM[, c(2:5)], by = list(cluster14), mean)
+cluster_df
+
+ggplot(cluster_df) +
+  geom_point(aes(x = frequency, y = monetary, color = as.factor(Group.1))) +
+  scale_y_log10() +
+  labs(color = "Clusters")
+```
+
+Here we can see how the means of each cluster is distributed. As we used the ranks of out RFM+Q, the groups are not as structured as one would expect. Lets have a look at the overall data.
+
+```{r Graph the clusters with the dataset}
+# Combine The clusters into the original RFM data frame
+RFM <- mutate(RFM, cluster14 = cluster14)
+
+ggplot(RFM) +
+  geom_point(aes(x = frequency, y = monetary, color = as.factor(cluster14), shape = as.factor(pareto_money))) +
+  scale_y_log10() +
+  scale_x_log10() +
+  labs(color='Clusters') +
+  labs(shape='Value Customers') +
+  labs(title = "Clusters over Frequency and Monetary")
+```
+
+
+
+
+
+
